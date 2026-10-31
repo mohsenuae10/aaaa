@@ -1,18 +1,6 @@
-# اختبار تحمّل الزوّار من خوادم GitHub المجانية (بديل عن إطلاقه من VPS المحجوب أو من الجوّال)
-#
-# لماذا هذا الملف؟ جدار Cloudflare الناري أمام Supabase يحجب **حسب معدّل الطلبات لكل IP**. فأي
-# اختبار يخرج من عنوان واحد (هذا الـVPS أو جوّالك) معرَّض للحجب قبل أن يصل القاعدة — بينما
-# ١٠٠٠ زائر حقيقي يأتون من ١٠٠٠ عنوان مختلف فلا يُشعلون الحدّ أبدًا. ولذلك يوزّع هذا الاختبار
-# الحِمل على عدّة خوادم (shards) متوازية: **كل خادم GitHub له IP مستقلّ**، فيقارب توزّع الزوّار
-# الحقيقي ويخفّض المعدّل لكل عنوان. منطق الرحلة والمراحل من whatsapp-service/k6/stress.js نفسه
-# (مصدر واحد، لا تكرار).
-#
-# التشغيل: تبويب Actions ← «اختبار تحمّل الزوّار» ← Run workflow ← اضبط الحقول ← Run.
-# الأسرار المطلوبة (Settings ← Secrets and variables ← Actions ← New repository secret):
-#   SUPABASE_URL   (مثال https://fvlzdoimtdhxyiobtmvm.supabase.co)
-#   SUPABASE_KEY   (المفتاح العام publishable — هو مضمَّن أصلًا في التطبيق)
-# اختياري لمحاكاة **عميل مسجَّل** (أصدق حِملًا: سياسات RLS تُقيَّم فعلًا + شاشتا حسابي/إشعاراتي):
-#   TEST_EMAIL + TEST_PASSWORD  (حساب عميل اختباري — تُسكّ جلسته داخل الاختبار تلقائيًّا)
+# اختبار تحمّل الزوّار من خوادم GitHub المجانية (نسخة مُبسَّطة لمستودع aaaa العام)
+# لا مهمّة تقسيم منفصلة، لا jq، لا مصفوفة ديناميكية — ٥ خوادم ثابتة (IP مستقلّ لكل واحد).
+# الأسرار: SUPABASE_URL + SUPABASE_KEY (مضبوطة). رحلة الزائر من whatsapp-service/k6/stress.js.
 
 name: اختبار تحمّل الزوّار (k6)
 
@@ -20,62 +8,29 @@ on:
   workflow_dispatch:
     inputs:
       visitors:
-        description: 'عدد الزوّار الكلي (يُقسَّم على الخوادم)'
+        description: 'عدد الزوّار الكلي (يُقسَّم على ٥ خوادم)'
         default: '1000'
-      shards:
-        description: 'عدد الخوادم المتوازية (IP مستقلّ لكل واحد، الحدّ ٢٠)'
-        default: '5'
       duration:
         description: 'مدّة المحاكاة بالثواني'
         default: '180'
       think:
         description: 'زمن تفكير الزائر بين الشاشات (ثانية)'
         default: '3'
-      ramp:
-        description: 'تصاعد تدريجي ١٠٪←٢٥٪←٥٠٪←١٠٠٪ (true) أو دفعة واحدة (false)'
-        default: 'true'
       detail:
-        description: 'قراءة المنتجات: فتح صنف من القائمة (true/false)'
+        description: 'فتح صنف من القائمة لقراءة منتج كامل (true/false)'
         default: 'true'
-      table:
-        description: 'قراءة جدول المنتجات كاملًا: off | each (كل زائر) | once (مرّة واحدة بالجلسة)'
-        default: 'off'
-      images:
-        description: 'قراءة كل روابط صور المنتجات (جدول products_image كاملًا) لكل زائر (true/false)'
-        default: 'false'
 
 permissions:
   contents: read
 
 jobs:
-  prepare:
-    name: تقسيم الحِمل
-    runs-on: ubuntu-latest
-    outputs:
-      list: ${{ steps.calc.outputs.list }}
-      vus: ${{ steps.calc.outputs.vus }}
-    steps:
-      - id: calc
-        run: |
-          S=${{ github.event.inputs.shards }}
-          V=${{ github.event.inputs.visitors }}
-          if [ "$S" -lt 1 ]; then S=1; fi
-          # سقف الوظائف المتوازية في الخطة المجانية (وصيانةً لمعدّل الطلبات لكل IP)
-          if [ "$S" -gt 20 ]; then S=20; fi
-          PER=$(( (V + S - 1) / S ))
-          echo "list=$(seq 1 $S | jq -R . | jq -cs .)" >> $GITHUB_OUTPUT
-          echo "vus=$PER" >> $GITHUB_OUTPUT
-          echo "### تقسيم الحِمل" >> $GITHUB_STEP_SUMMARY
-          echo "- الزوّار الكلي: **$V** على **$S** خادمًا = **$PER** زائر لكل خادم (IP مستقلّ)" >> $GITHUB_STEP_SUMMARY
-
   load:
     name: زوّار (خادم ${{ matrix.shard }})
-    needs: prepare
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false # فشل خادم واحد لا يُلغي البقية — نريد كل القياسات
+      fail-fast: false
       matrix:
-        shard: ${{ fromJson(needs.prepare.outputs.list) }}
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v4
 
@@ -85,59 +40,25 @@ jobs:
             | tar xz --strip-components=1 k6-v0.54.0-linux-amd64/k6
           ./k6 version
 
-      - name: سكّ جلسة عميل (إن وُجدت بيانات الحساب)
-        id: session
-        env:
-          SB_URL: ${{ secrets.SUPABASE_URL }}
-          SB_KEY: ${{ secrets.SUPABASE_KEY }}
-          EMAIL: ${{ secrets.TEST_EMAIL }}
-          PASSWORD: ${{ secrets.TEST_PASSWORD }}
-        run: |
-          if [ -z "$EMAIL" ] || [ -z "$PASSWORD" ]; then
-            echo "لا بيانات حساب — المحاكاة بالمفتاح العام (زائر غير مسجَّل)"
-            exit 0
-          fi
-          # GoTrue لا يُحجب عادةً حتى حين يُحجب /rest/v1 (مُثبَت حيًّا على الـVPS)
-          TOK=$(curl -s -X POST "$SB_URL/auth/v1/token?grant_type=password" \
-            -H "apikey: $SB_KEY" -H 'Content-Type: application/json' \
-            -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" | jq -r '.access_token // empty')
-          if [ -z "$TOK" ]; then echo "::warning::تعذّر سكّ الجلسة — سيكمل الاختبار بالمفتاح العام"; exit 0; fi
-          echo "::add-mask::$TOK"
-          echo "token=$TOK" >> $GITHUB_OUTPUT
-          # معرّف الملف الشخصي (profile.id) لتفعيل شاشتَي «حسابي/محفظتي» و«إشعاراتي» المفلترتين بالمالك.
-          # يُفكّ JWT بـpython3 لا base64 الصَدَفة: حِمل JWT بـbase64url وبلا حشو فيفشل `base64 -d`.
-          SUB=$(python3 -c "import base64,json,sys;p=sys.argv[1].split('.')[1];p+='='*(-len(p)%4);print(json.loads(base64.urlsafe_b64decode(p)).get('sub',''))" "$TOK")
-          if [ -n "$SUB" ]; then
-            PID=$(curl -s "$SB_URL/rest/v1/profile?select=id&user_id=eq.$SUB&limit=1" \
-              -H "apikey: $SB_KEY" -H "Authorization: Bearer $TOK" | jq -r '.[0].id // empty')
-            echo "pid=$PID" >> $GITHUB_OUTPUT
-          fi
-          echo "جلسة عميل حقيقية جاهزة"
-
       - name: تشغيل المحاكاة
         env:
           SB_URL: ${{ secrets.SUPABASE_URL }}
           SB_KEY: ${{ secrets.SUPABASE_KEY }}
-          SB_TOKEN: ${{ steps.session.outputs.token }}
-          PID: ${{ steps.session.outputs.pid }}
           SCENARIO: visitor
           THINK: ${{ github.event.inputs.think }}
           DETAIL: ${{ github.event.inputs.detail == 'true' && '1' || '0' }}
-          TABLE: ${{ github.event.inputs.table }}
-          IMAGES: ${{ github.event.inputs.images == 'true' && '1' || '0' }}
-          RAMP: ${{ github.event.inputs.ramp == 'true' && '1' || '0' }}
-          VUS: ${{ needs.prepare.outputs.vus }}
+          RAMP: '1'
           DUR: ${{ github.event.inputs.duration }}
+          TOTAL: ${{ github.event.inputs.visitors }}
         run: |
-          # في النمط التصاعدي تُبنى المراحل داخل السكربت من VUS/DUR، فلا تُمرَّر --vus/--duration
-          if [ "$RAMP" = "1" ]; then
-            ./k6 run --no-color --quiet \
-              --summary-export "summary-${{ matrix.shard }}.json" whatsapp-service/k6/stress.js
-          else
-            ./k6 run --no-color --quiet --vus "$VUS" --duration "${DUR}s" \
-              --summary-export "summary-${{ matrix.shard }}.json" whatsapp-service/k6/stress.js
-          fi
-        continue-on-error: true # تجاوز threshold يُخرج k6 برمز 99 — ليس فشل تشغيل
+          export VUS=$(( TOTAL / 5 ))
+          if [ "$VUS" -lt 1 ]; then export VUS=1; fi
+          echo "هذا الخادم يحاكي $VUS زائرًا (من $TOTAL على ٥ خوادم)"
+          # threshold فاشل يُخرج k6 برمز 99 — ليس فشل تشغيل، لذا || true
+          ./k6 run --no-color --summary-export "summary-${{ matrix.shard }}.json" \
+            whatsapp-service/k6/stress.js || true
+          echo "--- ملخّص الخادم ${{ matrix.shard }} ---"
+          cat "summary-${{ matrix.shard }}.json" 2>/dev/null | head -c 400 || echo "لا ملخّص"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -156,8 +77,6 @@ jobs:
           pattern: summary-*
           merge-multiple: true
 
-      # يجمع قياسات كل الخوادم في جدول واحد + حكمًا عربيًّا مطابقًا لحكم اللوحة:
-      # الفشل المصنَّف waf (جدار ناري) لا يُحسب عجزًا في القاعدة — بل دليل حدّ معدّل على ذلك IP.
       - name: تجميع النتائج
         run: |
           python3 - << 'PY' >> $GITHUB_STEP_SUMMARY
@@ -184,18 +103,13 @@ jobs:
           R = tot['reqs'] or 1
           waf_pct = tot['waf']/R*100; hard_pct = (tot['srv']+tot['net']+tot['rate'])/R*100
           err_pct = (R - tot['ok'])/R*100; p95 = max(p95s) if p95s else 0
-          print(f"\n**الإجمالي:** {tot['reqs']:,.0f} طلبًا · أسوأ p95 **{p95:,.0f}ms** · فشل **{err_pct:.1f}٪** · "
-                f"{tot['bytes']/1e6:,.1f}MB\n")
+          print(f"\n**الإجمالي:** {tot['reqs']:,.0f} طلبًا · أسوأ p95 **{p95:,.0f}ms** · فشل **{err_pct:.1f}٪** · {tot['bytes']/1e6:,.1f}MB\n")
           if waf_pct > 50:
-              print(f"🧱 **الاختبار لم يصل إلى القاعدة** — {waf_pct:.0f}٪ من الطلبات رُدّت بجدار Cloudflare "
-                    "الناري (403 FW_BLOCKED). زِد عدد الخوادم (shards) أو ارفع زمن التفكير لتخفيض "
-                    "المعدّل لكل IP؛ هذه ليست نتيجة عن قدرة القاعدة.")
+              print(f"🧱 **الاختبار لم يصل إلى القاعدة** — {waf_pct:.0f}٪ رُدّت بجدار Cloudflare الناري (403). زِد الخوادم أو ارفع زمن التفكير؛ ليست نتيجة عن قدرة القاعدة.")
           elif hard_pct > 5 or p95 > 3000:
-              print(f"❌ **لا تتحمّل هذا العدد** — تعثّر فعلي من جانب الخدمة {hard_pct:.1f}٪ "
-                    f"وأسوأ p95 {p95:,.0f}ms. راجع جدول الخوادم لمعرفة الدرجة التي انكسرت عندها.")
+              print(f"❌ **لا تتحمّل هذا العدد** — تعثّر فعلي من الخدمة {hard_pct:.1f}٪ وأسوأ p95 {p95:,.0f}ms.")
           elif err_pct > 1 or p95 > 1200:
-              print(f"⚠️ **تتحمّل لكن بضغط ملحوظ** — فشل {err_pct:.1f}٪ وp95 {p95:,.0f}ms "
-                    "(المقبول دون ١٢٠٠ms).")
+              print(f"⚠️ **تتحمّل لكن بضغط ملحوظ** — فشل {err_pct:.1f}٪ وp95 {p95:,.0f}ms.")
           else:
               print(f"✅ **تتحمّل** — فشل {err_pct:.1f}٪ وp95 {p95:,.0f}ms على {tot['reqs']:,.0f} طلبًا حقيقيًّا.")
           PY
